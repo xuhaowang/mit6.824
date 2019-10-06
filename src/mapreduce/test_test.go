@@ -159,17 +159,6 @@ func TestSequentialMany(t *testing.T) {
 	cleanup(mr)
 }
 
-func TestWorker(t *testing.T) {
-	var files []string
-	master := port("master")
-	mr := Distributed("test", files, 0, master)
-	for i := 0; i < 2; i++ {
-		go RunWorker(mr.address, port("worker"+strconv.Itoa(i)),
-			MapFunc, ReduceFunc, -1, nil)
-	}
-	mr.Wait()
-}
-
 func TestParallelBasic(t *testing.T) {
 	mr := setup()
 	for i := 0; i < 2; i++ {
