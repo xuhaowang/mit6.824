@@ -1,10 +1,10 @@
 package raftkv
 
 import (
-	"labgob"
-	"labrpc"
+	"github.com/xuhaowang/mit6.824/src/labgob"
+	"github.com/xuhaowang/mit6.824/src/labrpc"
 	"log"
-	"raft"
+	"github.com/xuhaowang/mit6.824/src/raft"
 	"sync"
 )
 
