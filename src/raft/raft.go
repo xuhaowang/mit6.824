@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 	"math/rand"
-	//"fmt"
+	"fmt"
 	"context"
 	"github.com/xuhaowang/mit6.824/src/labrpc"
 )
@@ -143,8 +143,8 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//fmt.Printf("I am %d, term: %d; request AppendEntries to %d, state: %d, term: %d\n", 
-	 //          args.LeaderID, args.LeaderTerm, rf.me, rf.state, rf.term)
+	fmt.Printf("I am %d, term: %d; request AppendEntries to %d, state: %d, term: %d\n", 
+	           args.LeaderID, args.LeaderTerm, rf.me, rf.state, rf.term)
 	rf.lastTime = time.Now()
 	reply.CurrentTerm = rf.term
 	if args.LeaderTerm < rf.term {
@@ -186,8 +186,8 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	//fmt.Printf("I am %d, term: %d; RequestVote to %d, state: %d, term: %d,\n",  
-	//            args.CandidateId, args.Term, rf.me, rf.state, rf.term)
+	fmt.Printf("I am %d, term: %d; RequestVote to %d, state: %d, term: %d, votedFor: %d\n",  
+	            args.CandidateId, args.Term, rf.me, rf.state, rf.term, rf.votedFor)
 	reply.CurrentTerm = rf.term
 	if rf.votedFor != -1 {
 		reply.VoteGranted = false
@@ -206,7 +206,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.lastTime = time.Now()
 		} else {
 			rf.state = follower
-			rf.votedFor = -1
 		}
 		rf.mu.Unlock()
 		return
@@ -306,7 +305,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = follower                 //begin as a follower
 	rf.term = 0
-	rf.votedFor = -1
+	//rf.votedFor = -1
 
 	go rf.runAsFollwer(applyCh)
 
@@ -319,7 +318,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 //When the rf instance is follower, run this function
 func (rf *Raft) runAsFollwer(applyCh chan ApplyMsg) {
-	//fmt.Printf("I am %d, term: %d, run as follower\n", rf.me, rf.term)
+	fmt.Printf("I am %d, term: %d, run as follower\n", rf.me, rf.term)
+	rf.votedFor = -1
 	electionTimeout := time.Duration(200 + rand.Intn(150)) * time.Millisecond
 	rf.lastTime = time.Now()
 	//timer := time.NewTimer(time.Duration(electionTimeout) * time.Millisecond)
@@ -338,7 +338,7 @@ func (rf *Raft) runAsFollwer(applyCh chan ApplyMsg) {
 }
 
 func (rf *Raft) runAsCandidate(applyCh chan ApplyMsg) {
-	//fmt.Printf("I am %d, term: %d, run as candidate\n", rf.me, rf.term)
+	fmt.Printf("I am %d, term: %d, run as candidate\n", rf.me, rf.term)
 	loop1:
 	for {
 		rf.mu.Lock()
@@ -411,7 +411,7 @@ func (rf *Raft) sendRequestVoteToPeers(){
 }
 
 func (rf *Raft) runAsLeader(applyCh chan ApplyMsg){
-	//fmt.Printf("I am %d, term: %d, run as leader\n", rf.me, rf.term)
+	fmt.Printf("I am %d, term: %d, run as leader\n", rf.me, rf.term)
 	ticker := time.NewTicker(heartbeatsPeroid * time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	rf.sendAppendEntriesToPeers(ctx)
