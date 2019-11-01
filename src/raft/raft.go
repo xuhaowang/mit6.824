@@ -145,11 +145,11 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	fmt.Printf("I am %d, term: %d; request AppendEntries to %d, state: %d, term: %d\n", 
 	           args.LeaderID, args.LeaderTerm, rf.me, rf.state, rf.term)
-	rf.lastTime = time.Now()
 	reply.CurrentTerm = rf.term
 	if args.LeaderTerm < rf.term {
 		reply.Success = false
 	} else {
+		rf.lastTime = time.Now()
 		reply.Success = true
 		if rf.state != follower {
 			rf.mu.Lock()
@@ -189,27 +189,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	fmt.Printf("I am %d, term: %d; RequestVote to %d, state: %d, term: %d, votedFor: %d\n",  
 	            args.CandidateId, args.Term, rf.me, rf.state, rf.term, rf.votedFor)
 	reply.CurrentTerm = rf.term
-	if rf.votedFor != -1 {
+	if args.Term < rf.term{
 		reply.VoteGranted = false
+	} else if args.Term == rf.term {
+		if rf.votedFor == -1 {
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateId
+		} else {
+			reply.VoteGranted = false
+		}
+		//reply.VoteGranted = (args.Term == rf.term)
 	} else {
 		reply.VoteGranted = true
-	}
-	if args.Term < rf.term {
-		reply.VoteGranted = false
-		return
-	} else if args.Term == rf.term {
-		return
-	} else {
 		rf.mu.Lock()
 		rf.term = args.Term
-		if rf.state == follower {
-			rf.lastTime = time.Now()
-		} else {
-			rf.state = follower
-		}
+		rf.votedFor = args.Term
+		if rf.state != follower {
+			rf.state =  follower
+		} 
 		rf.mu.Unlock()
-		return
 	}
+
+
+	// if rf.votedFor != -1 {
+	// 	reply.VoteGranted = false
+	// } else {
+	// 	reply.VoteGranted = true
+	// }
+
+	// if args.Term < rf.term {
+	// 	reply.VoteGranted = false
+	// 	return
+	// } else if args.Term == rf.term {
+	// 	return
+	// } else {
+	// 	rf.mu.Lock()
+	// 	rf.term = args.Term
+	// 	if rf.state != follower {
+	// 		rf.state = follower
+	// 	}
+	// 	rf.mu.Unlock()
+	// 	return
+	// }
 }
 
 //
@@ -425,8 +446,7 @@ func (rf *Raft) runAsLeader(applyCh chan ApplyMsg){
 			    break loop
 		    }
 		}
-	}
-	
+	}	
 	cancel()
 	go rf.runAsFollwer(applyCh)
 	
