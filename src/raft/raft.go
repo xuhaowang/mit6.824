@@ -62,25 +62,35 @@ type LogEntry struct {
 	Term      int 
 }
 
+type Counter struct {
+	mu       sync.Mutex
+	count    int
+}
+
 const heartbeatsPeroid time.Duration = 100    //the heartbeats peroid is 100ms, 10 times per second
 
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	state     State               // this peer's state
-	term      int
-	lastTime  time.Time           // the last time at which the peer heard from the leader
-	votedFor  int
-	votesNum  int                 // The votes got by this candidate
-	logs      []LogEntry
-	applyCh   chan ApplyMsg
-	nextIndex []int
-	ctx       context.Context
+	mu                    sync.Mutex          // Lock to protect shared access to this peer's state
+	//cond                  *sync.Cond           // Condition variables to indicate the change of the log buffer
+	peers                 []*labrpc.ClientEnd // RPC end points of all peers
+	persister             *Persister          // Object to hold this peer's persisted state
+	me                    int                 // this peer's index into peers[]
+	state                 State               // this peer's state
+	term                  int
+	lastTime              time.Time           // the last time at which the peer heard from the leader
+	votedFor              int
+	votesNum              int                 // The votes got by this candidate
+	logs                  []LogEntry
+	applyCh               chan ApplyMsg
+	nextIndex             []int
+	ctx                   context.Context
+	logBuf                []LogEntry          // bufffer used to store the log 
+	commitIndex           int
+	commitIndexChangeCh   chan int
+	lastApplied           int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -168,7 +178,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else {
 			rf.replyToAppendLogs(args, reply)
 		}
-				
+			
 	}
 }
 
@@ -177,8 +187,8 @@ func (rf *Raft) replyToAppendLogs(args *AppendEntriesArgs, reply *AppendEntriesR
 	//            args.LeaderID, args.LeaderTerm, args, rf.me, rf.state, rf.term)
 	if args.PrevLogIndex == 0 {                //The leader send logs to followers first time
 		rf.logs = append(rf.logs, args.Entry)
-		rf.applyCh <- ApplyMsg{true, args.Entry.Cmd, len(rf.logs) -1}
 		reply.Success = true
+		rf.applyCh <- ApplyMsg{true, args.Entry.Cmd, len(rf.logs) -1}
 	} else {
 		if args.PrevLogIndex >= len(rf.logs) {
 			reply.Success = false
@@ -189,9 +199,11 @@ func (rf *Raft) replyToAppendLogs(args *AppendEntriesArgs, reply *AppendEntriesR
 				reply.Success = true
 				if args.PrevLogIndex <  len(rf.logs) - 1 {
 					rf.logs[args.PrevLogIndex + 1] = args.Entry
+					//fmt.Println(args.PrevLogIndex, len(rf.logs))
 					rf.applyCh <- ApplyMsg{true, args.Entry.Cmd, args.PrevLogIndex + 1}
 				} else {
 					rf.logs = append(rf.logs, args.Entry)
+					//fmt.Println(rf.me,ApplyMsg{true, args.Entry.Cmd, len(rf.logs) -1})
 					rf.applyCh <- ApplyMsg{true, args.Entry.Cmd, len(rf.logs) -1}
 				}
 			}
@@ -208,6 +220,18 @@ func (rf *Raft) replyToHeartbeat(args *AppendEntriesArgs, reply *AppendEntriesRe
 		rf.term = args.LeaderTerm
 		rf.mu.Unlock()
 	} 
+}
+
+func (rf *Raft) applyCmdToMachine(){
+	for{
+		select{
+		case <- rf.commitIndexChangeCh:
+			for rf.lastApplied <= rf.commitIndex{
+				rf.lastApplied += 1
+				rf.applyCh <- ApplyMsg{true, rf.logs[rf.lastApplied].Cmd, rf.lastApplied}
+			}
+		}
+	}
 }
 
 
@@ -326,14 +350,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.logs = append(rf.logs, entry)
 	args := &AppendEntriesArgs{
-		LeaderTerm: rf.term,
-		LeaderID: rf.me,
 		Entry: entry,
 	}
 
 	rf.applyCh <- ApplyMsg{true, command, len(rf.logs) -1}
 
-	go rf.sendAppendEntriesToPeers(args)
+	//rf.cond = &sync.Cond{}
+
+	go rf.AppendLogsToPeers(args)
 
 	return len(rf.logs) - 1, rf.term, isLeader
 
@@ -380,8 +404,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//rf.votedFor = -1
 	rf.applyCh = applyCh
 	rf.logs = append(rf.logs, LogEntry{0, 0})
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 
 	go rf.runAsFollwer()
+	go rf.applyCmdToMachine()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -400,15 +427,46 @@ func (rf *Raft) runAsFollwer() {
 	for{
 		time.Sleep(electionTimeout)
 		if time.Since(rf.lastTime) >= electionTimeout {
-			rf.term += 1
-			rf.state = candidate
-			rf.votedFor = -1
-			break
+			if !rf.isDisconnect() {
+				rf.term += 1
+				rf.state = candidate
+				rf.votedFor = -1
+				break
+			}
 		}
 	}
 	if rf.state == candidate {
 		go rf.runAsCandidate()
 	}
+}
+
+func (rf *Raft) isDisconnect() bool{
+	counter := &Counter{
+		count: 0,
+	}
+	wg := sync.WaitGroup{}
+	for i := 0; i < len(rf.peers); i++{
+		if i == rf.me {
+			continue
+		} else {
+			wg.Add(1)
+			go func(counter *Counter, target int) {
+				arg := &AppendEntriesArgs{
+					LeaderTerm: -1,
+				}
+				reply := &AppendEntriesReply{}
+				ok := rf.peers[target].Call("Raft.AppendEntries", arg, reply)
+				if !ok {
+					counter.mu.Lock()
+					counter.count += 1
+					counter.mu.Unlock()
+				}
+				wg.Done()
+			}(counter, i)
+		}
+	}
+	wg.Wait()
+	return counter.count == len(rf.peers) - 1
 }
 
 func (rf *Raft) runAsCandidate() {
@@ -498,12 +556,12 @@ func (rf *Raft) runAsLeader(){
 		LeaderTerm: rf.term, 
 		LeaderID: rf.me,
 	}
-	rf.sendAppendEntriesToPeers(args)
+	rf.sendHeartbeatsToPeers(args)
 	loop:
 	for{
 		select {
 		case <- ticker.C:
-			rf.sendAppendEntriesToPeers(args)
+			rf.sendHeartbeatsToPeers(args)
 		default:
 		    if rf.state == follower{
 			    break loop
@@ -516,21 +574,44 @@ func (rf *Raft) runAsLeader(){
 }
 
 
-func (rf *Raft) sendAppendEntriesToPeers(args *AppendEntriesArgs){
+func (rf *Raft) sendHeartbeatsToPeers(args *AppendEntriesArgs){
 	for i := 0; i < len(rf.peers); i++{
 		if i == rf.me {
 			continue
 		} else {
 			if args.Entry == (LogEntry{}) {
 				go rf.sendHeartbeatToPeer(i, args)
-			} else {
-				go rf.sendLogToPeer(i, args)
-			}
+			} 
 		}
 	}
 }
 
-func (rf *Raft) sendLogToPeer(target int, args *AppendEntriesArgs){
+func (rf *Raft) AppendLogsToPeers(args *AppendEntriesArgs) {
+	counter := &Counter{
+		count: 1,
+	}
+	for i := 0; i < len(rf.peers); i++{
+		if i == rf.me {
+			continue
+		} else{
+			arg := &AppendEntriesArgs{
+				LeaderTerm: rf.term,
+				LeaderID: rf.me,
+			}
+			go rf.sendLogToPeer(i, arg, counter)
+		}
+	}
+
+	for{
+		if counter.count >= (int(len(rf.peers) / 2) + 1) {
+			rf.commitIndex += 1
+			//rf.commitIndexChangeCh <- 1
+			break
+		}
+	}
+}
+
+func (rf *Raft) sendLogToPeer(target int, args *AppendEntriesArgs, counter *Counter){
 	//fmt.Printf("I am %d, term: %d, run as leader; send log %+v to %d\n", rf.me, rf.term, args.Entry, target)
 	reply := &AppendEntriesReply {}
 	n := len(rf.logs)
@@ -541,15 +622,20 @@ func (rf *Raft) sendLogToPeer(target int, args *AppendEntriesArgs){
 		default:
 			args.PrevLogIndex = rf.nextIndex[target] - 1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+			args.Entry = rf.logs[rf.nextIndex[target]]
 			//fmt.Printf("I am %d, send %+v to %d, n: %d, nextIndex: %d \n", rf.me, args.Entry, target, n, rf.nextIndex[target])
-		    ok := rf.peers[target].Call("Raft.AppendEntries", args, reply)
-		    for !ok {
-				ok = rf.peers[target].Call("Raft.AppendEntries", args, reply)
+			ok := rf.peers[target].Call("Raft.AppendEntries", args, reply)
+		    if !ok {
+				fmt.Println("lose connection")
+				continue
 		    }
 		    if reply.Success {
-			    rf.nextIndex[target] += 1
+				rf.nextIndex[target] += 1
+				counter.mu.Lock()
+				counter.count += 1
+				counter.mu.Unlock()
 		    } else {
-				fmt.Printf("Append logs %+v fail", args.Entry)
+				fmt.Printf("Append logs %+v to %d fail\n", args.Entry, target)
 			    rf.nextIndex[target] -= 1
 		    }
 		}
